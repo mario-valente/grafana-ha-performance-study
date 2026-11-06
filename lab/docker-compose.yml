@@ -1,0 +1,72 @@
+# Lab reproduzível do estudo: 2 nós Grafana(s) + Postgres + HAProxy (sem sticky)
+#
+# Uso:
+#   docker compose up -d --wait
+#   ../scripts/test-ha-failover.sh
+#
+# Grafana na :13010 (g1), :13011 (g2) e LB em :13020 (haproxy)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: gf-lab-pw
+      POSTGRES_DB: grafana
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d grafana"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
+  grafana-1:
+    image: grafana/grafana-oss:latest
+    container_name: g1
+    ports: ["13010:3000"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+      start_period: 5s
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment: &genv
+      # sessões, usuários e dados: no banco compartilhado (auth token no DB)
+      GF_DATABASE_TYPE: postgres
+      GF_DATABASE_HOST: postgres:5432
+      GF_DATABASE_USER: postgres
+      GF_DATABASE_PASSWORD: gf-lab-pw
+      GF_DATABASE_NAME: grafana
+      # pool quente já no boot
+      GF_DATABASE_CONN_MAX_LIFETIME: 14400
+      GF_DATABASE_CONN_MAX_IDLE: 10
+      # tuning de boot
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_SECURITY_ADMIN_PASSWORD: AdminLab123!
+      GF_SECURITY_SECRET_KEY: lab-shared-secret-ha
+
+  grafana-2:
+    image: grafana/grafana-oss:latest
+    container_name: g2
+    ports: ["13011:3000"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+      start_period: 5s
+    depends_on:
+      # IMPORTANTÍSSIMO: o lock de migração é exclusivo. O 2º nó (que roda
+      # simultâneo com o 1º) MORRE com "failed to obtain lock".
+      grafana-1: { condition: service_healthy }
+    environment: *genv
+
+  haproxy:
+    image: haproxy:2.7-alpine
+    ports: ["13020:80"]
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - grafana-1
+      - grafana-2
